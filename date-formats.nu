@@ -217,8 +217,8 @@ def render-all [ctx: record]: nothing -> table {
   $DT_FORMATS | each {|spec|
     {
       name: $spec.name
-      standard: $spec.standard
       value: (render $ctx $spec)
+      standard: $spec.standard
       description: $spec.description
     }
   }
