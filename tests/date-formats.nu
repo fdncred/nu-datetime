@@ -2,9 +2,9 @@
 #
 #   nu tests/date-formats.nu
 #
-# Or, with Nushell's std test runner:
-#   use path/to/nu-std/testing.nu
-#   testing run-tests --path tests --module date-formats
+# `std/testing` supplies only the `@test` attribute in Nushell 0.115 - it has
+# no `run-tests` command - so `main` below is the runner. Any external runner
+# that understands those attributes (e.g. nutest) can discover them too.
 
 use std/testing *
 use std/assert
@@ -14,6 +14,9 @@ const SAMPLE = 2023-05-15T12:34:56.123456789+00:00
 const OFFSET = 2023-05-15T12:34:56.123456789-05:00
 const PAD = 2023-05-05T08:04:06+00:00
 const PAST = 1969-07-20T20:17:40.123456789+00:00
+const WHOLE = 2023-05-15T12:34:56+00:00
+const ANCIENT = 0001-01-01T00:00:00+00:00
+const FUTURE = 9999-12-31T00:00:00+00:00
 
 # Locale-dependent catalog names: compared to `format date`, not a snapshot.
 const LOCALE_FORMATS = [
@@ -94,8 +97,9 @@ const EXPECTED = [
 def format-failures [instant: datetime, cases: table]: nothing -> table {
   $cases
   | each {|row|
-      # `do` drops the `each` row so it is not piped into `date as`.
-      let actual = do { date as $row.name $instant }
+      # `$instant` is always supplied, so the row that `each` pipes in is
+      # never used as the instant.
+      let actual = date as $row.name $instant
       if $actual != $row.value {
         {name: $row.name, expected: $row.value, actual: $actual}
       }
@@ -350,8 +354,8 @@ def every_alias_matches_canonical [] {
     date list-formats
     | each {|row|
         $row.aliases | each {|alias|
-          let via_alias = do { date as $alias $SAMPLE }
-          let via_name = do { date as $row.name $SAMPLE }
+          let via_alias = date as $alias $SAMPLE
+          let via_name = date as $row.name $SAMPLE
           if $via_alias != $via_name {
             {alias: $alias, name: $row.name, alias_value: $via_alias, name_value: $via_name}
           }
@@ -511,12 +515,88 @@ def builtins_are_not_replaced [] {
   assert error { $SAMPLE | date format "%Y" }
 }
 
+@test
+def far_instants_format_without_overflow [] {
+  # Every non-nanosecond format must work outside the i64 nanosecond window
+  # (1677-09-21 .. 2262-04-11).
+  assert equal (date as iso-8601 $ANCIENT) "0001-01-01T00:00:00+00:00"
+  assert equal (date as rfc-7231 $ANCIENT) "Mon, 01 Jan 0001 00:00:00 GMT"
+  assert equal (date as rata-die $ANCIENT) 1
+  assert equal (date as julian-day $ANCIENT) 1721425.5
+  assert equal (date as iso-8601-year $FUTURE) "9999"
+  assert equal (date as rata-die $FUTURE) 3652059
+  assert equal (date as unix $FUTURE) 253402214400
+}
+
+@test
+def nanosecond_formats_reject_out_of_range_instants [] {
+  assert error { date as unix-ns $ANCIENT }
+  assert error { date as filetime $ANCIENT }
+  assert error { date as unix-ns $FUTURE }
+  assert error { date as filetime $FUTURE }
+  # The window boundary itself still round-trips exactly.
+  assert equal (date as unix-ns 2262-04-11T23:47:15.999999999+00:00) 9223372035999999999
+}
+
+@test
+def excel_1900_matches_excel_serials [] {
+  # Excel's 1900 system counts a phantom 1900-02-29, so serials before
+  # 1900-03-01 are one lower than a plain day count from 1899-12-31.
+  assert equal (date as excel-1900 1900-01-01T00:00:00+00:00) 1.0
+  assert equal (date as excel-1900 1900-02-28T00:00:00+00:00) 59.0
+  assert equal (date as excel-1900 1900-03-01T00:00:00+00:00) 61.0
+  assert equal (date as excel-1900 $FUTURE) 2958465.0
+  assert equal (date as excel-1904 1904-01-01T00:00:00+00:00) 0.0
+}
+
+@test
+def fractional_formats_always_carry_a_fraction [] {
+  # A whole-second instant must still render a fraction, or these formats are
+  # indistinguishable from iso-8601 / rfc-3339.
+  assert equal (date as iso-8601-full $WHOLE) "2023-05-15T12:34:56.000000000+00:00"
+  assert equal (date as rfc-3339-frac $WHOLE) "2023-05-15T12:34:56.000000000+00:00"
+  assert equal (date as ecma-262 $WHOLE) "2023-05-15T12:34:56.000Z"
+  assert equal (date as odata-datetimeoffset $WHOLE) "2023-05-15T12:34:56.0000000Z"
+  assert equal (date as net-roundtrip $WHOLE) "2023-05-15T12:34:56.0000000+00:00"
+}
+
+@test
+def date_as_all_rejects_an_explicit_format [] {
+  assert error { date as rfc-3339 --all }
+  assert error { date as --all rfc-3339 }
+}
+
+@test
+def date_as_all_accepts_pipeline_input [] {
+  assert equal ($SAMPLE | date as --all | length) (date list-formats | length)
+  assert equal (
+    $SAMPLE | date as --all | where name == "rfc-3339" | get 0.value
+  ) "2023-05-15T12:34:56+00:00"
+}
+
+@test
+def date_as_all_survives_out_of_range_instants [] {
+  let rows = date as --all --now $ANCIENT
+  assert equal ($rows | length) (date list-formats | length)
+  # Only the nanosecond formats drop out; everything else still renders.
+  assert equal ($rows | where value == null | get name | sort) [filetime unix-ns]
+  assert equal ($rows | where name == "iso-8601" | get 0.value) "0001-01-01T00:00:00+00:00"
+  assert equal ($rows | where name == "rata-die" | get 0.value) 1
+}
+
+@test
+def unknown_format_is_reported_before_instant_math [] {
+  # An out-of-range instant must not mask the real problem: the bad name.
+  let err = try { date as no-such-format $ANCIENT } catch {|e| $e.msg }
+  assert str contains $err "no-such-format"
+}
+
 def main [] {
   let failures = format-failures $SAMPLE $EXPECTED
   let locale_failures = (
     $LOCALE_FORMATS
     | each {|row|
-        let actual = do { date as $row.name $SAMPLE }
+        let actual = date as $row.name $SAMPLE
         let expected = $SAMPLE | format date $row.pattern
         if $actual != $expected {
           {name: $row.name, expected: $expected, actual: $actual}
@@ -579,6 +659,14 @@ def main [] {
     date_list_formats_has_expected_columns
     builtins_are_not_replaced
     date_as_all_covers_every_catalog_name
+    far_instants_format_without_overflow
+    nanosecond_formats_reject_out_of_range_instants
+    excel_1900_matches_excel_serials
+    fractional_formats_always_carry_a_fraction
+    date_as_all_rejects_an_explicit_format
+    date_as_all_accepts_pipeline_input
+    date_as_all_survives_out_of_range_instants
+    unknown_format_is_reported_before_instant_math
     print $"ok ($EXPECTED | length | $in + ($LOCALE_FORMATS | length)) formats, aliases, helpers, and API checks"
   } else {
     print ($all | table)

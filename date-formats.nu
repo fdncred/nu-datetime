@@ -17,7 +17,7 @@
 const ISO_FORMATS = [
   [name aliases kind tz locale pattern unit transform standard description];
   [iso-8601 [iso8601 iso] strftime preserve C "%Y-%m-%dT%H:%M:%S%:z" "" "" "ISO 8601-1" "Extended calendar date-time with colon offset"]
-  [iso-8601-full [iso-8601-frac] strftime preserve C "%+" "" "" "ISO 8601-1" "Extended date-time with fractional seconds and colon offset"]
+  [iso-8601-full [iso-8601-frac] strftime preserve C "%Y-%m-%dT%H:%M:%S%.9f%:z" "" "" "ISO 8601-1" "Extended date-time with fractional seconds and colon offset"]
   [iso-8601-basic [] strftime preserve C "%Y%m%dT%H%M%S%z" "" "" "ISO 8601-1" "Basic calendar date-time with basic offset"]
   [iso-8601-utc [utc zulu z] strftime UTC C "%Y-%m-%dT%H:%M:%SZ" "" "" "ISO 8601-1" "Extended date-time in UTC with Z"]
   [iso-8601-basic-utc [] strftime UTC C "%Y%m%dT%H%M%SZ" "" "" "ISO 8601-1" "Basic date-time in UTC with Z"]
@@ -42,7 +42,7 @@ const RFC_FORMATS = [
   [name aliases kind tz locale pattern unit transform standard description];
   [rfc-3339 [rfc3339 atom rfc-4287 json rfc-7493 yaml-timestamp xsd-dateTime toml-offset-datetime w3c-dtf] strftime preserve C "%Y-%m-%dT%H:%M:%S%:z" "" "" "RFC 3339" "Internet date/time with colon offset"]
   [rfc-3339-utc [] strftime UTC C "%Y-%m-%dT%H:%M:%SZ" "" "" "RFC 3339" "Internet date/time in UTC with Z"]
-  [rfc-3339-frac [] strftime preserve C "%+" "" "" "RFC 3339" "Internet date/time with fractional seconds"]
+  [rfc-3339-frac [] strftime preserve C "%Y-%m-%dT%H:%M:%S%.9f%:z" "" "" "RFC 3339" "Internet date/time with fractional seconds"]
   [rfc-3339-space [] strftime preserve C "%Y-%m-%d %H:%M:%S%:z" "" "" "RFC 3339" "Internet date/time with space instead of T"]
   [rfc-9557 [ixdtf] rfc-9557 UTC C "" "" "" "RFC 9557" "Internet Extended Date/Time Format with [UTC]"]
   [rfc-5322 [rfc-2822 rfc2822 rfc5322 email] strftime preserve C "%a, %d %b %Y %H:%M:%S %z" "" "" "RFC 5322" "Internet Message Format date (4-digit year, numeric offset)"]
@@ -116,21 +116,36 @@ def resolve-instant [now?: datetime]: [nothing -> datetime, datetime -> datetime
 
 def make-ctx [now?: datetime]: [nothing -> record, datetime -> record, any -> record] {
   let dt = $in | resolve-instant $now
-  let unix_s = $dt | format date "%s" | into int
-  let unix_sub = $dt | format date "%f" | into int
   {
     dt: $dt
     utc: ($dt | date to-timezone UTC)
-    unix_s: $unix_s
-    unix_sub: $unix_sub
-    unix_ns: ($unix_s * 1_000_000_000 + $unix_sub)
+    unix_s: ($dt | format date "%s" | into int)
+    unix_sub: ($dt | format date "%f" | into int)
   }
+}
+
+# Nanoseconds since the Unix epoch.
+#
+# Computed on demand: `unix_s * 1_000_000_000` overflows i64 outside
+# 1677-09-21 .. 2262-04-11, so it must not be part of every context or
+# every format (including plain strftime ones) would fail on such instants.
+const UNIX_NS_MAX_S = 9_223_372_035
+const UNIX_NS_MIN_S = -9_223_372_036
+
+def ctx-unix-ns [ctx: record]: nothing -> int {
+  if $ctx.unix_s > $UNIX_NS_MAX_S or $ctx.unix_s < $UNIX_NS_MIN_S {
+    error make {
+      msg: $"instant out of range for nanosecond precision: ($ctx.dt | format date '%Y-%m-%dT%H:%M:%S%:z')"
+      help: "unix-ns and filetime only cover 1677-09-21 .. 2262-04-11; use unix, unix-ms, or unix-us"
+    }
+  }
+  $ctx.unix_s * 1_000_000_000 + $ctx.unix_sub
 }
 
 def find-format [name: string]: nothing -> record {
   let key = $name | str lowercase
   let hit = $DT_FORMATS | where {|row|
-    ($row.name | str lowercase) == $key or $key in ($row.aliases | each { str lowercase })
+    ($row.name | str lowercase) == $key or ($row.aliases | any {|alias| ($alias | str lowercase) == $key})
   }
   if ($hit | is-empty) {
     error make {
@@ -143,6 +158,14 @@ def find-format [name: string]: nothing -> record {
 
 def unix-days [ctx: record]: nothing -> float {
   ($ctx.unix_s | into float) / 86400.0 + ($ctx.unix_sub | into float) / 86400.0 / 1_000_000_000.0
+}
+
+# Excel's 1900 date system counts a phantom 1900-02-29, so every serial from
+# 1900-03-01 (serial 61) onward is one greater than the real day count from
+# 1899-12-31. Earlier serials must drop that extra day to match Excel.
+def excel-1900-serial [ctx: record]: nothing -> float {
+  let serial = (unix-days $ctx) + 25569.0
+  if $serial < 61.0 { $serial - 1.0 } else { $serial }
 }
 
 def fmt-strftime [ctx: record, spec: record]: nothing -> string {
@@ -165,7 +188,7 @@ def fmt-unix [ctx: record, unit: string]: nothing -> int {
     "s" => $ctx.unix_s
     "ms" => ($ctx.unix_s * 1_000 + $ctx.unix_sub // 1_000_000)
     "us" => ($ctx.unix_s * 1_000_000 + $ctx.unix_sub // 1_000)
-    "ns" => $ctx.unix_ns
+    "ns" => (ctx-unix-ns $ctx)
     _ => (error make {msg: $"internal: unknown unix unit ($unit)"})
   }
 }
@@ -204,10 +227,10 @@ def render [ctx: record, spec: record]: nothing -> any {
     "julian" => ((unix-days $ctx) + 2440587.5)
     "mjd" => ((unix-days $ctx) + 40587.0)
     "rata-die" => (((unix-days $ctx) | math floor | into int) + 719163)
-    "excel-1900" => ((unix-days $ctx) + 25569.0)
+    "excel-1900" => (excel-1900-serial $ctx)
     "excel-1904" => ((unix-days $ctx) + 24107.0)
     "ntp" => (($ctx.unix_s | into float) + ($ctx.unix_sub | into float) / 1_000_000_000.0 + 2208988800.0)
-    "filetime" => ($ctx.unix_ns // 100 + 116444736000000000)
+    "filetime" => ((ctx-unix-ns $ctx) // 100 + 116444736000000000)
     "cf-absolute" => (($ctx.unix_s | into float) + ($ctx.unix_sub | into float) / 1_000_000_000.0 - 978307200.0)
     _ => (error make {msg: $"internal: unknown format kind ($spec.kind)"})
   }
@@ -217,7 +240,10 @@ def render-all [ctx: record]: nothing -> table {
   $DT_FORMATS | each {|spec|
     {
       name: $spec.name
-      value: (render $ctx $spec)
+      # A format that cannot represent this instant (unix-ns and filetime
+      # outside the i64 nanosecond window) yields null rather than killing the
+      # whole survey. `date as <name>` still reports why.
+      value: (try { render $ctx $spec } catch { null })
       standard: $spec.standard
       description: $spec.description
     }
@@ -261,18 +287,27 @@ export def "date as" [
   --now: datetime                        # instant as a flag (use with --all)
   --all(-a)                              # emit every format as a table
 ]: [nothing -> any, datetime -> any, any -> any] {
+  let piped = $in
   if $format == null and not $all {
     error make {
       msg: "date as requires a format name, or --all"
       help: "examples: `date as rfc-3339`, `date as --all`, `date list-formats`"
     }
   }
-  let chosen = $instant | default $now
-  let ctx = $in | make-ctx $chosen
+  if $format != null and $all {
+    error make {
+      msg: $"date as --all renders every format; it cannot also take the format ($format)"
+      help: "drop --all to render one format, or drop the format name to render all of them"
+    }
+  }
+  # Resolve the format before building the context so an unknown name reports
+  # itself instead of whatever the context happens to fail on.
+  let spec = if $all { null } else { find-format $format }
+  let ctx = $piped | make-ctx ($instant | default $now)
   if $all {
     render-all $ctx
   } else {
-    render $ctx (find-format $format)
+    render $ctx $spec
   }
 }
 

@@ -72,7 +72,7 @@ date as <format> [instant] [--now <datetime>] [--all]
 | `format` | Catalog name or alias. Required unless `--all`. |
 | `instant` | Datetime to format. Optional. |
 | `--now` | Same as `instant`, as a flag. Use with `--all`. |
-| `--all` / `-a` | Render every catalog format as a table. |
+| `--all` / `-a` | Render every catalog format as a table. Cannot be combined with `format`. |
 
 **Where the instant comes from** (first match wins):
 
@@ -90,9 +90,15 @@ date as
 date as no-such-format $t
 # Error: unknown datetime format: no-such-format
 #   help: run `date list-formats` to see supported formats
+
+# a format name plus --all is an error, not a silently ignored argument
+date as rfc-3339 --all
+# Error: date as --all renders every format; it cannot also take the format rfc-3339
 ```
 
-`--all` returns a table with `name`, `value`, `standard`, and `description`:
+`--all` returns a table with `name`, `value`, `standard`, and `description`. A
+format that cannot represent the instant (see the nanosecond range note below)
+has a `null` `value` instead of failing the whole table:
 
 ```nu
 date as --all --now $t | where name =~ "^rfc-3339"
@@ -116,8 +122,9 @@ Names and aliases are case-insensitive: `date as RFC-3339`, `date as Json`, and 
 List every published format.
 
 ```nu
-date list-formats          # name, aliases, standard, description
-date list-formats --full   # plus kind, tz, locale, pattern, unit, transform
+date list-formats            # name, aliases, standard, description
+date list-formats --full     # plus kind, tz, locale, pattern, unit, transform
+date list-formats -f         # short flag for --full
 ```
 
 ```nu
@@ -330,11 +337,25 @@ date as unix-ns $apollo     # -14182939876543211
 date as filetime $apollo    # 116302906601234567
 ```
 
+`unix-ns` and `filetime` count nanoseconds in a 64-bit integer, so they only
+cover `1677-09-21` .. `2262-04-11` and raise an error outside that window.
+Every other format, including `unix`, `unix-ms`, `unix-us`, `rata-die`, and the
+Julian/Excel serials, works across the full `datetime` range:
+
+```nu
+date as iso-8601 0001-01-01T00:00:00+00:00   # 0001-01-01T00:00:00+00:00
+date as rata-die 0001-01-01T00:00:00+00:00   # 1
+date as unix-ns  0001-01-01T00:00:00+00:00
+# Error: instant out of range for nanosecond precision: 0001-01-01T00:00:00+00:00
+```
+
 - `unix` / `unix-ms` / `unix-us` / `unix-ns` — seconds / ms / µs / ns since 1970-01-01T00:00:00Z
 - `julian-day` — Julian Day Number (UTC)
 - `modified-julian-day` — JD − 2400000.5
 - `rata-die` — day number with 0001-01-01 = 1 (UTC, floored)
-- `excel-1900` / `excel-1904` — Excel serial date (Windows / Mac)
+- `excel-1900` / `excel-1904` — Excel serial date (Windows / Mac). `excel-1900`
+  reproduces Excel's phantom `1900-02-29`, so serials before `1900-03-01` are
+  one lower than a plain day count from `1899-12-31` (`1900-01-01` → `1`).
 - `ntp` — seconds since 1900-01-01T00:00:00Z
 - `filetime` — 100 ns ticks since 1601-01-01T00:00:00Z
 - `cf-absolute` — seconds since 2001-01-01T00:00:00Z (`NSTimeInterval`)
@@ -358,13 +379,14 @@ $t | format date "%Y-%m-%d %H:%M"   # custom strftime
 ## Tests
 
 ```nu
-# standalone runner (snapshots, aliases, helpers, API)
+# snapshots, aliases, helpers, API
 nu tests/date-formats.nu
-
-# or Nushell's std test runner
-use std/testing
-testing run-tests --path tests --module date-formats
 ```
+
+`std/testing` in Nushell 0.115 supplies only the `@test` attribute - it has no
+`run-tests` command - so `main` in `tests/date-formats.nu` is the runner. An
+external runner that understands those attributes (e.g. nutest) can also
+discover them.
 
 ## License
 
