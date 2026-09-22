@@ -12,7 +12,7 @@ This module extends Nushell's built-in `date` family with a catalog of named sta
 
 Clone or copy `date-formats.nu` somewhere on disk. There is no extra install step.
 
-```nu
+```nushell
 # from the repo root
 use ./date-formats.nu *
 
@@ -29,11 +29,11 @@ Add the `use` line to your `config.nu` to load the module in every session.
 
 Examples below use this instant:
 
-```nu
+```nushell
 let t = 2023-05-15T12:34:56.123456789+00:00
 ```
 
-```nu
+```nushell
 # current time, RFC 3339
 date as rfc-3339
 
@@ -81,7 +81,16 @@ date as <format> [instant] [--now <datetime>] [--all]
 3. Pipeline input, if it is a `datetime`
 4. `date now`
 
-```nu
+Step 3 checks the type. Pipeline input that is *not* a `datetime` — a string, an
+int, a list — does not raise; it falls through to `date now`, so a forgotten
+`into datetime` formats the current instant instead of the value you piped in:
+
+```nushell
+"2023-05-15" | date as rfc-3339         # today, not 2023-05-15
+"2023-05-15" | into datetime | date as rfc-3339   # the piped value, local offset
+```
+
+```nushell
 # missing both a format and --all is an error
 date as
 # Error: date as requires a format name, or --all
@@ -100,7 +109,7 @@ date as rfc-3339 --all
 format that cannot represent the instant (see the nanosecond range note below)
 has a `null` `value` instead of failing the whole table:
 
-```nu
+```nushell
 date as --all --now $t | where name =~ "^rfc-3339"
 ```
 
@@ -121,13 +130,13 @@ Names and aliases are case-insensitive: `date as RFC-3339`, `date as Json`, and 
 
 List every published format.
 
-```nu
+```nushell
 date list-formats            # name, aliases, standard, description
 date list-formats --full     # plus kind, tz, locale, pattern, unit, transform
 date list-formats -f         # short flag for --full
 ```
 
-```nu
+```nushell
 date list-formats | where standard == "RFC 3339"
 date list-formats | where {|row| "json" in $row.aliases}
 ```
@@ -140,7 +149,7 @@ date list-formats | where {|row| "json" in $row.aliases}
 
 These commands wrap `date as` for scripts that already call them. Prefer `date as <name>` in new code.
 
-```nu
+```nushell
 utc $t                 # iso-8601-utc
 iso-8601 $t
 iso-8601-full $t
@@ -158,7 +167,7 @@ unix-timestamp --nanos $t   # nanoseconds
 
 Each helper accepts a positional datetime or pipeline input, same as `date as`:
 
-```nu
+```nushell
 $t | rfc-3339
 $t | unix-timestamp --nanos
 ```
@@ -170,7 +179,7 @@ Each catalog entry has a `tz` policy:
 - **`preserve`** — format the instant's own offset (no conversion).
 - **`UTC`** — convert to UTC first (Z / GMT / `[UTC]`).
 
-```nu
+```nushell
 let offset = 2023-05-15T12:34:56.123456789-05:00
 
 $offset | date as iso-8601      # 2023-05-15T12:34:56-05:00   (preserve)
@@ -212,7 +221,7 @@ Values are for `2023-05-15T12:34:56.123456789+00:00`.
 | `iso-8601-ordinal-basic` | | `2023135` | ISO 8601-1 |
 | `iso-8601-ordinal-datetime` | | `2023-135T12:34:56+00:00` | ISO 8601-1 |
 
-```nu
+```nushell
 date as iso $t                  # alias of iso-8601
 date as iso-8601-week-date $t   # 2023-W20-1
 date as iso-8601-ordinal $t     # 2023-135
@@ -236,7 +245,11 @@ date as iso-8601-ordinal $t     # 2023-135
 | `rfc-4517` | `ldap`, `ldap-generalized-time` | `20230515123456.123456Z` | RFC 4517 |
 | `ldap-generalized-time-basic` | | `20230515123456Z` | RFC 4517 |
 
-```nu
+`rfc-3339-frac` and `rfc-9557` always render nine fractional digits, even for a
+whole-second instant (`2023-05-15T12:34:56.000000000+00:00`), so their width is
+fixed. Use `rfc-3339` when you want no fraction at all.
+
+```nushell
 # HTTP Date header (always GMT)
 date as http-date $t
 # => Mon, 15 May 2023 12:34:56 GMT
@@ -258,7 +271,7 @@ date as email $t
 | `odata-datetimeoffset` | | `2023-05-15T12:34:56.1234567Z` | OData |
 | `fhir-datetime` | `fhir-dateTime` | `2023-05-15T12:34:56Z` | HL7 FHIR |
 
-```nu
+```nushell
 date as js-iso $t
 # => 2023-05-15T12:34:56.123Z
 ```
@@ -267,7 +280,8 @@ date as js-iso $t
 
 | Name | Aliases | Example | Standard |
 |---|---|---|---|
-| `asctime` | `posix-asctime` | `Mon May 15 12:34:56 2023` | ANSI C / RFC 9110 |
+| `asctime` | `posix-asctime` | `Mon May 15 12:34:56 2023` | ANSI C |
+| `asctime-gmt` | `http-asctime` | `Mon May 15 12:34:56 2023` | RFC 9110 |
 | `local-datetime` | `locale` | locale `%c` | libc |
 | `locale-date` | | locale `%x` | libc |
 | `locale-time` | | locale `%X` | libc |
@@ -289,10 +303,18 @@ date as js-iso $t
 Notes:
 
 - `asctime` space-pads single-digit days: `Fri May  5 08:04:06 2023`.
+- `asctime` is ANSI C `asctime()`: local time, offset preserved. `asctime-gmt`
+  is RFC 9110's obsolete HTTP `asctime-date`, which must be GMT, so it converts
+  first. They differ only off UTC:
+
+  ```nushell
+  $offset | date as asctime       # Mon May 15 12:34:56 2023
+  $offset | date as asctime-gmt   # Mon May 15 17:34:56 2023
+  ```
 - `iso-9660` encodes the offset in 15-minute units (`-05:00` → `-20`).
 - `nato-dtg` month names are uppercased.
 
-```nu
+```nushell
 date as sql-timestamp $t
 # => 2023-05-15 12:34:56
 
@@ -319,7 +341,7 @@ These return numbers, not strings.
 | `filetime` | | `133286276961234567` | MS-DTYP |
 | `cf-absolute` | `apple-epoch`, `nstimeinterval` | `705846896.1234567` | Apple CFAbsoluteTime |
 
-```nu
+```nushell
 date as unix $t
 # => 1684154096
 
@@ -342,7 +364,7 @@ cover `1677-09-21` .. `2262-04-11` and raise an error outside that window.
 Every other format, including `unix`, `unix-ms`, `unix-us`, `rata-die`, and the
 Julian/Excel serials, works across the full `datetime` range:
 
-```nu
+```nushell
 date as iso-8601 0001-01-01T00:00:00+00:00   # 0001-01-01T00:00:00+00:00
 date as rata-die 0001-01-01T00:00:00+00:00   # 1
 date as unix-ns  0001-01-01T00:00:00+00:00
@@ -364,7 +386,7 @@ date as unix-ns  0001-01-01T00:00:00+00:00
 
 It only **formats** an instant. Parsing, timezone conversion, and relative phrases stay on the builtins:
 
-```nu
+```nushell
 date now
 date to-timezone UTC
 date list-timezone
@@ -378,7 +400,7 @@ $t | format date "%Y-%m-%d %H:%M"   # custom strftime
 
 ## Tests
 
-```nu
+```nushell
 # snapshots, aliases, helpers, API
 nu tests/date-formats.nu
 ```
@@ -387,6 +409,12 @@ nu tests/date-formats.nu
 `run-tests` command - so `main` in `tests/date-formats.nu` is the runner. An
 external runner that understands those attributes (e.g. nutest) can also
 discover them.
+
+`main` discovers the `@test` commands from `scope commands` rather than listing
+them, so adding a test is enough to have it run. Because Nushell cannot call a
+command by name from a string, it passes the discovered names to a child `nu`
+that sources the file; every check runs even when an earlier one fails, and each
+failure prints its test name and the full error.
 
 ## License
 

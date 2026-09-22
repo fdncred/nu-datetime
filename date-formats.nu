@@ -44,7 +44,7 @@ const RFC_FORMATS = [
   [rfc-3339-utc [] strftime UTC C "%Y-%m-%dT%H:%M:%SZ" "" "" "RFC 3339" "Internet date/time in UTC with Z"]
   [rfc-3339-frac [] strftime preserve C "%Y-%m-%dT%H:%M:%S%.9f%:z" "" "" "RFC 3339" "Internet date/time with fractional seconds"]
   [rfc-3339-space [] strftime preserve C "%Y-%m-%d %H:%M:%S%:z" "" "" "RFC 3339" "Internet date/time with space instead of T"]
-  [rfc-9557 [ixdtf] rfc-9557 UTC C "" "" "" "RFC 9557" "Internet Extended Date/Time Format with [UTC]"]
+  [rfc-9557 [ixdtf] rfc-9557 UTC C "%Y-%m-%dT%H:%M:%S%.9f%:z" "" "" "RFC 9557" "Internet Extended Date/Time Format with [UTC]"]
   [rfc-5322 [rfc-2822 rfc2822 rfc5322 email] strftime preserve C "%a, %d %b %Y %H:%M:%S %z" "" "" "RFC 5322" "Internet Message Format date (4-digit year, numeric offset)"]
   [rfc-822 [rfc822 rfc-1036 rfc1036 rss] strftime preserve C "%a, %d %b %y %H:%M:%S %z" "" "" "RFC 822" "ARPA Internet Text Messages date (2-digit year)"]
   [rfc-850 [rfc850] strftime UTC C "%A, %d-%b-%y %H:%M:%S GMT" "" "" "RFC 850" "Obsolete HTTP date with full weekday and 2-digit year"]
@@ -64,7 +64,8 @@ const WEB_FORMATS = [
 
 const LEGACY_FORMATS = [
   [name aliases kind tz locale pattern unit transform standard description];
-  [asctime [posix-asctime] strftime preserve C "%a %b %e %H:%M:%S %Y" "" "" "ANSI C / RFC 9110" "asctime() date, space-padded day, no timezone"]
+  [asctime [posix-asctime] strftime preserve C "%a %b %e %H:%M:%S %Y" "" "" "ANSI C" "asctime() date, space-padded day, local time, no timezone"]
+  [asctime-gmt [http-asctime] strftime UTC C "%a %b %e %H:%M:%S %Y" "" "" "RFC 9110" "Obsolete HTTP asctime-date, always GMT"]
   [local-datetime [locale] strftime preserve local "%c" "" "" "libc" "Locale date and time"]
   [locale-date [] strftime preserve local "%x" "" "" "libc" "Locale date"]
   [locale-time [] strftime preserve local "%X" "" "" "libc" "Locale time"]
@@ -204,6 +205,13 @@ def fmt-frac7 [ctx: record, spec: record]: nothing -> string {
   }
 }
 
+# RFC 9557 is an RFC 3339 timestamp followed by a bracketed IANA time zone.
+# The timestamp comes from the catalog pattern and tz columns like every other
+# strftime format; only the suffix belongs to this kind.
+def fmt-rfc-9557 [ctx: record, spec: record]: nothing -> string {
+  $"(fmt-strftime $ctx $spec)[($spec.tz)]"
+}
+
 def fmt-iso-9660 [ctx: record]: nothing -> string {
   let datepart = $ctx.dt | format date "%Y%m%d%H%M%S"
   let hundredths = $ctx.dt | format date "%3f" | str substring 0..<2
@@ -222,7 +230,7 @@ def render [ctx: record, spec: record]: nothing -> any {
     "strftime" => (fmt-strftime $ctx $spec)
     "unix" => (fmt-unix $ctx $spec.unit)
     "frac7" => (fmt-frac7 $ctx $spec)
-    "rfc-9557" => $"($ctx.utc | format date '%+')[UTC]"
+    "rfc-9557" => (fmt-rfc-9557 $ctx $spec)
     "iso-9660" => (fmt-iso-9660 $ctx)
     "julian" => ((unix-days $ctx) + 2440587.5)
     "mjd" => ((unix-days $ctx) + 40587.0)
